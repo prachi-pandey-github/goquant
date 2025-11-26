@@ -31,28 +31,33 @@ pub mod oracle_integration {
     ) -> Result<PriceData> {
         let _pyth_price_account = &ctx.accounts.pyth_price_account;
         
-        // For now, return mock data - integration can be completed later
+        // TODO: Implement real Pyth price parsing
+        // For now, return realistic mock data that follows real oracle patterns
+        let current_timestamp = Clock::get()?.unix_timestamp;
+        
+        // Simulate realistic price data with proper validation
         let current_price = pyth_sdk_solana::Price {
             price: 50000_00000000, // $50,000 with 8 decimals
-            conf: 1000000,         // $10 confidence
+            conf: 500_00000,       // $5 confidence (0.01% of price)
             expo: -8,              // 8 decimal places
-            publish_time: Clock::get()?.unix_timestamp,
+            publish_time: current_timestamp - 10, // 10 seconds ago
         };
         
-        // Validate staleness
+        // Validate staleness (configurable max_staleness from config)
         let clock = Clock::get()?;
         let current_timestamp = clock.unix_timestamp;
-        if current_timestamp - current_price.publish_time > 30 {
+        if current_timestamp - current_price.publish_time > ctx.accounts.config.max_staleness {
             return Err(ErrorCode::StalePrice.into());
         }
         
-        // Check if price is available
-        if current_price.price == 0 {
+        // Check if price is available and positive
+        if current_price.price <= 0 {
             return Err(ErrorCode::PriceUnavailable.into());
         }
         
-        // Validate confidence interval
-        if current_price.conf > ctx.accounts.config.max_confidence {
+        // Validate confidence interval (confidence as percentage of price) 
+        let confidence_percentage = (current_price.conf as f64 / current_price.price as f64) * 10000.0;
+        if confidence_percentage > ctx.accounts.config.max_confidence as f64 {
             return Err(ErrorCode::LowConfidence.into());
         }
         

@@ -1,6 +1,7 @@
 [workspace]
 members = [
-    "programs/oracle-integration"
+    "programs/oracle-integration",
+    "oracle-service"
 ]
 resolver = "2"
 
