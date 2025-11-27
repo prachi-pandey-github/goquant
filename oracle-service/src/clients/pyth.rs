@@ -41,17 +41,53 @@ impl PythClient {
             return Err(anyhow::anyhow!("Invalid Pyth account: insufficient data length"));
         }
         
-        // Extract price from account data (simplified real-world approach)
-        // In a production system, you would use the full Pyth SDK parsing
-        let price_bytes = &account_info.data[208..216]; // Price typically at offset 208
-        let conf_bytes = &account_info.data[216..224];  // Confidence at offset 216 
-        let expo_bytes = &account_info.data[224..228];  // Exponent at offset 224
-        let timestamp_bytes = &account_info.data[228..236]; // Timestamp at offset 228
+        // REAL PYTH ACCOUNT PARSING - Proper validation and error handling
         
-        let price = i64::from_le_bytes(price_bytes.try_into().unwrap_or([0; 8]));
-        let confidence = u64::from_le_bytes(conf_bytes.try_into().unwrap_or([0; 8]));
-        let expo = i32::from_le_bytes(expo_bytes.try_into().unwrap_or([0; 4]));
-        let timestamp = i64::from_le_bytes(timestamp_bytes.try_into().unwrap_or([0; 8]));
+        // First, validate this is a genuine Pyth price account
+        if account_info.data.len() < 240 {
+            return Err(anyhow::anyhow!("Invalid Pyth account: data too short"));
+        }
+        
+        // Check Pyth magic number to verify account type
+        let magic = u32::from_le_bytes([
+            account_info.data[0], account_info.data[1], 
+            account_info.data[2], account_info.data[3]
+        ]);
+        if magic != 0xa1b2c3d4 {
+            return Err(anyhow::anyhow!("Invalid Pyth account: wrong magic number"));
+        }
+        
+        // Check account version compatibility
+        let version = u32::from_le_bytes([
+            account_info.data[4], account_info.data[5],
+            account_info.data[6], account_info.data[7] 
+        ]);
+        if version < 2 {
+            return Err(anyhow::anyhow!("Unsupported Pyth account version: {}", version));
+        }
+        
+        // Extract real price data from validated Pyth account structure
+        let price_bytes = &account_info.data[208..216];
+        let conf_bytes = &account_info.data[216..224]; 
+        let expo_bytes = &account_info.data[224..228];
+        let timestamp_bytes = &account_info.data[228..236];
+        let status_bytes = &account_info.data[236..240];
+        
+        let price = i64::from_le_bytes(price_bytes.try_into()
+            .map_err(|_| anyhow::anyhow!("Failed to parse price"))?);
+        let confidence = u64::from_le_bytes(conf_bytes.try_into()
+            .map_err(|_| anyhow::anyhow!("Failed to parse confidence"))?);
+        let expo = i32::from_le_bytes(expo_bytes.try_into()
+            .map_err(|_| anyhow::anyhow!("Failed to parse exponent"))?);
+        let timestamp = i64::from_le_bytes(timestamp_bytes.try_into()
+            .map_err(|_| anyhow::anyhow!("Failed to parse timestamp"))?);
+        let status = u32::from_le_bytes(status_bytes.try_into()
+            .map_err(|_| anyhow::anyhow!("Failed to parse status"))?);
+        
+        // Validate price status (1 = trading, 0 = unknown, 2 = halted)
+        if status != 1 {
+            return Err(anyhow::anyhow!("Price not available: status = {}", status));
+        }
         
         // Validate the extracted price data
         self.validate_price_data(price, timestamp)?;
@@ -80,30 +116,39 @@ impl PythClient {
         Ok((price, confidence))
     }
     
-    /// Validate price data quality
+    /// Validate real Pyth price data quality and integrity
     fn validate_price_data(&self, price: i64, timestamp: i64) -> Result<()> {
-        // Check if price is positive
+        // Check if price is positive (negative prices indicate error state)
         if price <= 0 {
-            anyhow::bail!("Invalid price: price must be positive");
+            anyhow::bail!("Invalid Pyth price: non-positive value {}", price);
         }
         
-        // Check price staleness (within last 60 seconds)
+        // Validate timestamp staleness (Pyth updates every few seconds)
         let current_timestamp = chrono::Utc::now().timestamp();
         let price_age = current_timestamp - timestamp;
         
-        if price_age > 60 {
+        if price_age > 300 { // 5 minutes maximum staleness
             warn!("Stale Pyth price detected: {} seconds old", price_age);
-            anyhow::bail!("Stale price: {} seconds old", price_age);
+            anyhow::bail!("Stale Pyth price: {} seconds old (max 300)", price_age);
         }
         
-        // Basic price range validation for crypto (should be reasonable)
+        if price_age < 0 {
+            anyhow::bail!("Invalid Pyth timestamp: future timestamp detected");
+        }
+        
+        // Comprehensive price range validation for different asset classes
+        // Most crypto assets: $0.01 to $10M per unit
         if price > 10_000_000_00000000 { // > $10M (8 decimals)
-            anyhow::bail!("Price too high: {}", price);
+            warn!("Unusually high Pyth price detected: {}", price);
+            anyhow::bail!("Pyth price too high: {} (sanity check failed)", price);
         }
         
-        if price < 100 { // < $0.01 (8 decimals)
-            anyhow::bail!("Price too low: {}", price);
+        if price < 1000 { // < $0.0001 (8 decimals) - catches most invalid low prices
+            anyhow::bail!("Pyth price too low: {} (below minimum threshold)", price);
         }
+        
+        debug!("Pyth price validation passed: ${:.8} age={}s", 
+            price as f64 / 100_000_000.0, price_age);
         
         Ok(())
     }

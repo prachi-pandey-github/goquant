@@ -38,36 +38,59 @@ impl SwitchboardClient {
             return Err(anyhow::anyhow!("Invalid Switchboard account data"));
         }
         
-        // For now, create a realistic price based on current market data
-        // In production, you would use proper Switchboard deserialization
-        let current_timestamp = chrono::Utc::now().timestamp();
+        // REAL SWITCHBOARD AGGREGATOR PARSING - No more fake prices!
         
-        // Extract some basic data from account for validation
-        let price_value = if !account_info.data.is_empty() {
-            // Use first 8 bytes as a seed for price generation
-            let seed = u64::from_le_bytes([
-                account_info.data[0], account_info.data[1], account_info.data[2], account_info.data[3],
-                account_info.data[4], account_info.data[5], account_info.data[6], account_info.data[7]
-            ]);
-            
-            // Generate deterministic but realistic price based on aggregator address
-            let base_price = match aggregator_address {
-                addr if addr.len() > 30 => (seed % 100000) + 50000, // BTC-like range
-                _ => (seed % 5000) + 1000, // Default crypto range
-            };
-            base_price as i64
-        } else {
-            return Err(anyhow::anyhow!("Empty account data"));
-        };
+        if account_info.data.len() < 256 {
+            return Err(anyhow::anyhow!("Invalid Switchboard account: data too short"));
+        }
+        
+        // Validate Switchboard aggregator discriminator
+        let discriminator = &account_info.data[0..8];
+        let expected_discriminator = [217, 230, 65, 101, 201, 162, 27, 125];
+        if discriminator != expected_discriminator {
+            return Err(anyhow::anyhow!("Invalid Switchboard aggregator: wrong discriminator"));
+        }
+        
+        // Extract current value from aggregator result (SwitchboardDecimal)
+        let mantissa_bytes = &account_info.data[144..152]; // 8 bytes
+        let scale_bytes = &account_info.data[152..156];    // 4 bytes
+        let timestamp_bytes = &account_info.data[200..208]; // 8 bytes
+        
+        // Extract min/max responses for confidence calculation
+        let min_response_bytes = &account_info.data[208..216];
+        let max_response_bytes = &account_info.data[216..224];
+        
+        let mantissa = i64::from_le_bytes(mantissa_bytes.try_into()
+            .map_err(|_| anyhow::anyhow!("Failed to parse mantissa"))?);
+        let scale = u32::from_le_bytes(scale_bytes.try_into()
+            .map_err(|_| anyhow::anyhow!("Failed to parse scale"))?);
+        let latest_timestamp = i64::from_le_bytes(timestamp_bytes.try_into()
+            .map_err(|_| anyhow::anyhow!("Failed to parse timestamp"))?);
+        let min_response = i64::from_le_bytes(min_response_bytes.try_into()
+            .map_err(|_| anyhow::anyhow!("Failed to parse min response"))?);
+        let max_response = i64::from_le_bytes(max_response_bytes.try_into()
+            .map_err(|_| anyhow::anyhow!("Failed to parse max response"))?);
+        
+        // Validate timestamp (check for staleness)
+        let current_timestamp = chrono::Utc::now().timestamp();
+        if current_timestamp - latest_timestamp > 300 { // 5 minutes staleness limit
+            return Err(anyhow::anyhow!("Stale Switchboard data: {} seconds old", 
+                current_timestamp - latest_timestamp));
+        }
+        
+        let price_value = mantissa;
         
         // Validate the extracted price
         self.validate_result(price_value)?;
         
+        // Calculate real confidence from oracle response spread
+        let confidence_value = ((max_response - min_response).abs() / 2) as u64;
+        
         let price_data = PriceData {
             price: price_value,
-            confidence: self.calculate_confidence(price_value)?,
-            expo: -8, // Standard decimal places
-            timestamp: current_timestamp,
+            confidence: confidence_value,
+            expo: -(scale as i32),
+            timestamp: latest_timestamp,
             source: PriceSource::Switchboard,
             symbol: "".to_string(), // Will be set by the caller
         };
@@ -77,12 +100,7 @@ impl SwitchboardClient {
         Ok(price_data)
     }
     
-    /// Calculate confidence interval based on price
-    fn calculate_confidence(&self, price: i64) -> Result<u64> {
-        // Calculate confidence as a percentage of price (typically 0.1-1%)
-        let confidence = price / 1000; // 0.1% of price
-        Ok(confidence.max(100) as u64) // Minimum confidence of 100 (satoshi-level)
-    }
+
     
     /// Validate Switchboard result data 
     fn validate_result(&self, price: i64) -> Result<()> {

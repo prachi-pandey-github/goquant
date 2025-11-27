@@ -31,43 +31,69 @@ pub mod oracle_integration {
     ) -> Result<PriceData> {
         let pyth_price_account = &ctx.accounts.pyth_price_account;
         
-        // For now, extract price data from account structure directly
-        // In production, use proper Pyth SDK when API is stable
+        // REAL PYTH PRICE PARSING - No more mock data!
         if pyth_price_account.data_len() < 240 {
             return Err(ErrorCode::InvalidPriceAccount.into());
         }
         
-        // Mock realistic price data for compilation - replace with real parsing
-        let current_price = pyth_sdk_solana::Price {
-            price: 50000_00000000, // $50,000
-            conf: 500_00000,       // $5 confidence
-            expo: -8,              // 8 decimals
-            publish_time: Clock::get()?.unix_timestamp - 5, // 5 seconds ago
-        };
+        // Parse actual Pyth price account data structure
+        // Pyth v2 account structure offsets:
+        let account_data = pyth_price_account.try_borrow_data()?;
         
-        // Validate staleness (configurable max_staleness from config)
+        // Verify this is a valid Pyth price account by checking magic number
+        let magic = u32::from_le_bytes([
+            account_data[0], account_data[1], account_data[2], account_data[3]
+        ]);
+        if magic != 0xa1b2c3d4 {  // Pyth magic number
+            return Err(ErrorCode::InvalidPriceAccount.into());
+        }
+        
+        // Extract real price data from Pyth account structure
+        let price_bytes = &account_data[208..216];
+        let conf_bytes = &account_data[216..224]; 
+        let expo_bytes = &account_data[224..228];
+        let timestamp_bytes = &account_data[228..236];
+        let status_bytes = &account_data[236..240];
+        
+        let price = i64::from_le_bytes(price_bytes.try_into()
+            .map_err(|_| ErrorCode::InvalidPriceAccount)?);
+        let confidence = u64::from_le_bytes(conf_bytes.try_into()
+            .map_err(|_| ErrorCode::InvalidPriceAccount)?);
+        let expo = i32::from_le_bytes(expo_bytes.try_into()
+            .map_err(|_| ErrorCode::InvalidPriceAccount)?);
+        let publish_time = i64::from_le_bytes(timestamp_bytes.try_into()
+            .map_err(|_| ErrorCode::InvalidPriceAccount)?);
+        let status = u32::from_le_bytes(status_bytes.try_into()
+            .map_err(|_| ErrorCode::InvalidPriceAccount)?);
+        
+        // Validate price status (1 = trading, 0 = unknown, 2 = halted)
+        if status != 1 {
+            return Err(ErrorCode::PriceUnavailable.into());
+        }
+        
+        // Validate staleness
         let clock = Clock::get()?;
         let current_timestamp = clock.unix_timestamp;
-        if current_timestamp - current_price.publish_time > ctx.accounts.config.max_staleness {
+        if current_timestamp - publish_time > ctx.accounts.config.max_staleness {
             return Err(ErrorCode::StalePrice.into());
         }
         
         // Check if price is available and positive
-        if current_price.price <= 0 {
+        if price <= 0 {
             return Err(ErrorCode::PriceUnavailable.into());
         }
         
         // Validate confidence interval (confidence as percentage of price) 
-        let confidence_percentage = (current_price.conf as f64 / current_price.price as f64) * 10000.0;
+        let confidence_percentage = (confidence as f64 / price.abs() as f64) * 10000.0;
         if confidence_percentage > ctx.accounts.config.max_confidence as f64 {
             return Err(ErrorCode::LowConfidence.into());
         }
         
         Ok(PriceData {
-            price: current_price.price,
-            confidence: current_price.conf,
-            expo: current_price.expo,
-            timestamp: current_price.publish_time,
+            price,
+            confidence,
+            expo,
+            timestamp: publish_time,
             source: PriceSource::Pyth,
         })
     }
@@ -78,32 +104,85 @@ pub mod oracle_integration {
     ) -> Result<PriceData> {
         let switchboard_account = &ctx.accounts.switchboard_aggregator;
         
-        // For now, extract price from account data directly
-        // In production, use proper Switchboard SDK when compatible
-        if switchboard_account.data_len() < 64 {
+        // REAL SWITCHBOARD AGGREGATOR PARSING - No more mock data!
+        if switchboard_account.data_len() < 256 {
             return Err(ErrorCode::InvalidAggregatorAccount.into());
         }
         
+        let account_data = switchboard_account.try_borrow_data()?;
+        
+        // Parse Switchboard aggregator account structure
+        // Switchboard aggregator structure offsets:
+        
+        // First, verify this is a valid Switchboard aggregator
+        let discriminator = &account_data[0..8];
+        // Switchboard aggregator discriminator: [217, 230, 65, 101, 201, 162, 27, 125]
+        let expected_discriminator = [217, 230, 65, 101, 201, 162, 27, 125];
+        if discriminator != expected_discriminator {
+            return Err(ErrorCode::InvalidAggregatorAccount.into());
+        }
+        
+        // Extract current value from aggregator result
+        // Current value is stored as SwitchboardDecimal at offset 144
+        let value_bytes = &account_data[144..152]; // 8 bytes for mantissa
+        let scale_bytes = &account_data[152..156]; // 4 bytes for scale
+        
+        // Extract timestamp from latest confirmed round (offset 200)
+        let timestamp_bytes = &account_data[200..208];
+        
+        // Extract min/max oracle responses for confidence calculation
+        let min_response_bytes = &account_data[208..216];
+        let max_response_bytes = &account_data[216..224];
+        
+        let mantissa = i128::from_le_bytes([
+            value_bytes[0], value_bytes[1], value_bytes[2], value_bytes[3],
+            value_bytes[4], value_bytes[5], value_bytes[6], value_bytes[7],
+            0, 0, 0, 0, 0, 0, 0, 0, // Pad to 16 bytes
+        ]);
+        let scale = u32::from_le_bytes(scale_bytes.try_into()
+            .map_err(|_| ErrorCode::InvalidAggregatorAccount)?);
+        let latest_timestamp = i64::from_le_bytes(timestamp_bytes.try_into()
+            .map_err(|_| ErrorCode::InvalidAggregatorAccount)?);
+        let min_response = i128::from_le_bytes([
+            min_response_bytes[0], min_response_bytes[1], min_response_bytes[2], min_response_bytes[3],
+            min_response_bytes[4], min_response_bytes[5], min_response_bytes[6], min_response_bytes[7],
+            0, 0, 0, 0, 0, 0, 0, 0,
+        ]);
+        let max_response = i128::from_le_bytes([
+            max_response_bytes[0], max_response_bytes[1], max_response_bytes[2], max_response_bytes[3],
+            max_response_bytes[4], max_response_bytes[5], max_response_bytes[6], max_response_bytes[7],
+            0, 0, 0, 0, 0, 0, 0, 0,
+        ]);
+        
+        // Validate timestamp staleness
         let clock = Clock::get()?;
         let current_time = clock.unix_timestamp;
-        
-        // Mock realistic Switchboard data for compilation
-        let result = switchboard_solana::SwitchboardDecimal {
-            mantissa: 49500_00000000, // $49,500
-            scale: 8,                 // 8 decimal places
-        };
-        
-        // Basic staleness check (mock timestamp)
-        let mock_timestamp = current_time - 15; // 15 seconds ago
-        if current_time - mock_timestamp > ctx.accounts.config.max_staleness {
+        if current_time - latest_timestamp > ctx.accounts.config.max_staleness {
             return Err(ErrorCode::StalePrice.into());
         }
         
+        // Convert mantissa to i64 (truncating if necessary for compatibility)
+        let price = if mantissa > i64::MAX as i128 {
+            i64::MAX
+        } else if mantissa < i64::MIN as i128 {
+            i64::MIN  
+        } else {
+            mantissa as i64
+        };
+        
+        // Calculate confidence from min/max spread
+        let confidence = ((max_response - min_response).abs() / 2) as u64;
+        
+        // Validate price is positive
+        if price <= 0 {
+            return Err(ErrorCode::PriceUnavailable.into());
+        }
+        
         Ok(PriceData {
-            price: result.mantissa as i64,
-            confidence: 1000000, // Mock confidence
-            expo: -(result.scale as i32),
-            timestamp: mock_timestamp,
+            price,
+            confidence,
+            expo: -(scale as i32),
+            timestamp: latest_timestamp,
             source: PriceSource::Switchboard,
         })
     }
