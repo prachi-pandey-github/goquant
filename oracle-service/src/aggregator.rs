@@ -1,6 +1,5 @@
 use anyhow::Result;
-use statrs::statistics::{OrderStatistics, Statistics};
-use std::collections::HashMap;
+use statrs::statistics::Statistics;
 use tracing::{debug, warn};
 
 use crate::types::{PriceData, PriceSource, Symbol};
@@ -8,16 +7,16 @@ use crate::types::{PriceData, PriceSource, Symbol};
 /// Advanced price aggregation engine with manipulation resistance
 pub struct PriceAggregator {
     // Configuration for different aggregation methods
-    deviation_threshold: f64,
-    confidence_weight: f64,
+    _deviation_threshold: f64,
+    _confidence_weight: f64,
     min_sources: usize,
 }
 
 impl PriceAggregator {
     pub fn new() -> Self {
         Self {
-            deviation_threshold: 0.01, // 1% maximum deviation
-            confidence_weight: 0.7,    // Weight given to confidence in final score
+            _deviation_threshold: 0.01, // 1% maximum deviation
+            _confidence_weight: 0.7,    // Weight given to confidence in final score
             min_sources: 1,            // Minimum sources required
         }
     }
@@ -67,6 +66,19 @@ impl PriceAggregator {
         price_data.price as f64 / 10_f64.powi(-price_data.expo)
     }
     
+    /// Calculate median from a slice of f64 values
+    fn calculate_median(&self, mut values: Vec<f64>) -> f64 {
+        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let len = values.len();
+        if len == 0 {
+            0.0
+        } else if len % 2 == 0 {
+            (values[len / 2 - 1] + values[len / 2]) / 2.0
+        } else {
+            values[len / 2]
+        }
+    }
+
     /// Detect and filter statistical outliers
     fn filter_outliers(&self, prices: &[f64], original_data: &[PriceData]) -> Result<Vec<PriceData>> {
         if prices.len() <= 2 {
@@ -74,11 +86,11 @@ impl PriceAggregator {
         }
         
         // Calculate median and median absolute deviation (MAD)
-        let median = prices.median();
+        let median = self.calculate_median(prices.to_vec());
         let deviations: Vec<f64> = prices.iter()
             .map(|&p| (p - median).abs())
             .collect();
-        let mad = deviations.median();
+        let mad = self.calculate_median(deviations);
         
         // Filter outliers using modified z-score method
         let mut filtered = Vec::new();
@@ -115,7 +127,7 @@ impl PriceAggregator {
         }
         
         // Method 1: Median (most manipulation-resistant)
-        let median_price = values.median();
+        let median_price = self.calculate_median(values.clone());
         
         // Method 2: Confidence-weighted average
         let weighted_avg = self.confidence_weighted_average(prices)?;
@@ -218,7 +230,7 @@ impl PriceAggregator {
         
         // Check for suspiciously tight clustering (potential coordination)
         if current_values.len() > 1 {
-            let price_variance = current_values.variance();
+            let price_variance = current_values.clone().variance();
             let mean_price = current_values.mean();
             
             if price_variance / (mean_price * mean_price) < 0.0001 { // Very low relative variance

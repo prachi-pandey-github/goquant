@@ -49,8 +49,10 @@ pub async fn run() -> Result<()> {
     
     // Start REST API server
     let api_manager = oracle_manager.clone();
+    let api_host = config.server.host.clone();
+    let api_port = config.server.port;
     let api_task = tokio::spawn(async move {
-        if let Err(e) = start_server(&config.server.host, config.server.port, api_manager).await {
+        if let Err(e) = start_server(&api_host, api_port, api_manager).await {
             error!("API server failed: {}", e);
         }
     });
@@ -58,8 +60,9 @@ pub async fn run() -> Result<()> {
     // Start WebSocket server
     let ws_port = config.server.port + 1; // WebSocket on port + 1
     let ws_manager = oracle_manager.clone();
+    let ws_host = config.server.host.clone();
     let ws_task = tokio::spawn(async move {
-        if let Err(e) = start_websocket_server(&config.server.host, ws_port, ws_manager).await {
+        if let Err(e) = start_websocket_server(&ws_host, ws_port, ws_manager).await {
             error!("WebSocket server failed: {}", e);
         }
     });

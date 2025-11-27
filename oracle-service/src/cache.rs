@@ -1,5 +1,5 @@
 use anyhow::Result;
-use redis::{Client, aio::Connection, AsyncCommands};
+use redis::{Client, AsyncCommands};
 use serde::{Serialize, Deserialize};
 use std::time::Duration;
 use tracing::{debug, error};
@@ -32,15 +32,15 @@ impl PriceCache {
         let value = serde_json::to_string(price_data)?;
         
         // Set with TTL
-        conn.set_ex(&key, &value, self.cache_ttl).await?;
+        conn.set_ex::<_, _, ()>(&key, &value, self.cache_ttl).await?;
         
         // Also set in a sorted set for price history (optional)
         let history_key = format!("history:{}", symbol);
         let score = price_data.timestamp as f64;
-        conn.zadd(&history_key, &value, score).await?;
+        conn.zadd::<_, _, _, ()>(&history_key, &value, score).await?;
         
         // Keep only last 1000 entries in history
-        conn.zremrangebyrank(&history_key, 0, -1001).await?;
+        conn.zremrangebyrank::<_, ()>(&history_key, 0, -1001).await?;
         
         debug!("Cached price for {} at ${}", symbol, self.format_price(price_data));
         Ok(())
@@ -97,7 +97,7 @@ impl PriceCache {
             pipe.set_ex(&key, &value, self.cache_ttl);
         }
         
-        pipe.query_async(&mut conn).await?;
+        pipe.query_async::<_, ()>(&mut conn).await?;
         
         debug!("Batch cached {} prices", prices.len());
         Ok(())
@@ -161,9 +161,9 @@ impl PriceCache {
     pub async fn get_stats(&self) -> Result<CacheStats> {
         let mut conn = self.connection_pool.clone();
         
-        // Get basic Redis stats
-        let info: String = conn.info("memory").await?;
-        let keyspace: String = conn.info("keyspace").await?;
+        // Get basic Redis stats  
+        let info: String = redis::cmd("INFO").arg("memory").query_async(&mut conn).await?;
+        let keyspace: String = redis::cmd("INFO").arg("keyspace").query_async(&mut conn).await?;
         
         // Count price keys
         let price_keys: Vec<String> = conn.keys("price:*").await?;
@@ -185,7 +185,7 @@ impl PriceCache {
         let price_key = format!("price:{}", symbol);
         let history_key = format!("history:{}", symbol);
         
-        conn.del(&[price_key, history_key]).await?;
+        conn.del::<_, ()>(&[price_key, history_key]).await?;
         
         debug!("Cleared cache for symbol: {}", symbol);
         Ok(())
@@ -194,7 +194,7 @@ impl PriceCache {
     /// Clear all cached data
     pub async fn clear_all(&self) -> Result<()> {
         let mut conn = self.connection_pool.clone();
-        conn.flushdb().await?;
+        redis::cmd("FLUSHDB").query_async::<_, ()>(&mut conn).await?;
         
         debug!("Cleared all cached data");
         Ok(())
@@ -206,7 +206,7 @@ impl PriceCache {
             conn => conn,
         };
         
-        match conn.ping().await {
+        match redis::cmd("PING").query_async::<_, String>(&mut conn).await {
             Ok(_) => {
                 debug!("Redis health check passed");
                 true

@@ -8,8 +8,8 @@ use axum::{
 };
 use futures_util::{sink::SinkExt, stream::StreamExt};
 use serde_json;
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::{RwLock, broadcast};
+use std::sync::Arc;
+use tokio::sync::{broadcast, Mutex};
 use tracing::{info, error, warn};
 
 use crate::{
@@ -34,12 +34,14 @@ pub async fn websocket_handler(
 
 /// Handle individual WebSocket connection
 async fn handle_websocket(socket: WebSocket, state: WsState) {
-    let (mut sender, mut receiver) = socket.split();
+    let (sender, mut receiver) = socket.split();
+    let sender = Arc::new(Mutex::new(sender));
     let mut broadcast_receiver = state.broadcast_sender.subscribe();
     
     info!("New WebSocket connection established");
     
     // Task for handling incoming messages from client
+    let sender_clone = sender.clone();
     let client_task = tokio::spawn(async move {
         while let Some(msg) = receiver.next().await {
             match msg {
@@ -54,6 +56,7 @@ async fn handle_websocket(socket: WebSocket, state: WsState) {
                                 message: "Invalid message format".to_string(),
                             };
                             if let Ok(json) = serde_json::to_string(&error_msg) {
+                                let mut sender = sender_clone.lock().await;
                                 if sender.send(Message::Text(json)).await.is_err() {
                                     break;
                                 }
@@ -75,9 +78,11 @@ async fn handle_websocket(socket: WebSocket, state: WsState) {
     });
     
     // Task for broadcasting updates to client
+    let sender_clone = sender.clone();
     let broadcast_task = tokio::spawn(async move {
         while let Ok(message) = broadcast_receiver.recv().await {
             if let Ok(json) = serde_json::to_string(&message) {
+                let mut sender = sender_clone.lock().await;
                 if sender.send(Message::Text(json)).await.is_err() {
                     break;
                 }
@@ -95,7 +100,7 @@ async fn handle_websocket(socket: WebSocket, state: WsState) {
 }
 
 /// Handle messages from WebSocket clients
-async fn handle_client_message(message: WsMessage, state: &WsState) {
+async fn handle_client_message(message: WsMessage, _state: &WsState) {
     match message {
         WsMessage::Subscribe { symbols } => {
             info!("Client subscribed to symbols: {:?}", symbols);
